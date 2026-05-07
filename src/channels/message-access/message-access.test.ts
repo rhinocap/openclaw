@@ -60,6 +60,30 @@ const dangerousAdapter: InternalChannelIngressAdapter = {
   matchSubject: adapter.matchSubject,
 };
 
+const lowerCaseAdapter: InternalChannelIngressAdapter = {
+  normalizeEntries({ entries }) {
+    return {
+      matchable: entries.map((entry, index) => ({
+        opaqueEntryId: `entry-${index + 1}`,
+        kind: "stable-id",
+        value: entry.toLowerCase(),
+      })),
+      invalid: [],
+      disabled: [],
+    };
+  },
+  matchSubject({ subject, entries }) {
+    const values = new Set(subject.identifiers.map((identifier) => identifier.value.toLowerCase()));
+    const matchedEntryIds = entries
+      .filter((entry) => entry.kind === "stable-id" && values.has(entry.value))
+      .map((entry) => entry.opaqueEntryId);
+    return {
+      matched: matchedEntryIds.length > 0,
+      matchedEntryIds,
+    };
+  },
+};
+
 function baseInput(overrides: Partial<ChannelIngressStateInput> = {}): ChannelIngressStateInput {
   return {
     channelId: "test",
@@ -354,6 +378,53 @@ describe("channel message access ingress", () => {
           authMode: "origin-subject",
           mayPair: false,
           originSubject: subject("different-sender"),
+        },
+        allowlists: {},
+      }),
+    );
+
+    const decision = decideChannelIngress(state, basePolicy);
+
+    expect(state.event.originSubjectMatched).toBe(false);
+    expect(decision).toMatchObject({
+      admission: "drop",
+      decision: "block",
+      reasonCode: "origin_subject_not_matched",
+    });
+  });
+
+  it("matches origin-subject events through adapter-normalized identity values", async () => {
+    const state = await resolveChannelIngressState(
+      baseInput({
+        adapter: lowerCaseAdapter,
+        subject: subject("Sender-1"),
+        event: {
+          kind: "reaction",
+          authMode: "origin-subject",
+          mayPair: false,
+          originSubject: subject("sender-1"),
+        },
+        allowlists: {},
+      }),
+    );
+
+    const decision = decideChannelIngress(state, basePolicy);
+
+    expect(state.event.originSubjectMatched).toBe(true);
+    expect(decision).toMatchObject({
+      admission: "dispatch",
+      decision: "allow",
+    });
+  });
+
+  it("does not treat origin-subject values as allowlist wildcards", async () => {
+    const state = await resolveChannelIngressState(
+      baseInput({
+        event: {
+          kind: "reaction",
+          authMode: "origin-subject",
+          mayPair: false,
+          originSubject: subject("*"),
         },
         allowlists: {},
       }),

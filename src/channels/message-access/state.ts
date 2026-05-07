@@ -120,19 +120,100 @@ function groupSenderEntries(params: {
   ]);
 }
 
-function subjectIdentifierKeys(subject: InternalChannelIngressSubject): Set<string> {
-  return new Set(subject.identifiers.map((identifier) => `${identifier.kind}:${identifier.value}`));
+function subjectHasExactIdentifier(params: {
+  subject: InternalChannelIngressSubject;
+  identifier: InternalChannelIngressSubject["identifiers"][number];
+}): boolean {
+  return params.subject.identifiers.some(
+    (current) =>
+      current.kind === params.identifier.kind && current.value === params.identifier.value,
+  );
 }
 
-function originSubjectMatched(input: ChannelIngressStateInput): boolean {
+function eventSubjectMatchContext(input: ChannelIngressStateInput): "dm" | "group" {
+  return input.conversation.kind === "direct" ? "dm" : "group";
+}
+
+async function normalizeSubjectIdentifiersForMatch(params: {
+  input: ChannelIngressStateInput;
+  subject: InternalChannelIngressSubject;
+  context: "dm" | "group";
+  opaquePrefix: string;
+}): Promise<InternalNormalizedEntry[]> {
+  const normalized = await Promise.all(
+    params.subject.identifiers.map(async (identifier, identifierIndex) => {
+      const entries = await params.input.adapter.normalizeEntries({
+        entries: [identifier.value],
+        context: params.context,
+        accountId: params.input.accountId,
+      });
+      return (
+        entries.matchable
+          // Origin subjects are identity material, not configured allowlists.
+          // Do not let a subject value normalize into adapter wildcard semantics.
+          .filter((entry) => entry.kind === identifier.kind && entry.value !== "*")
+          .map((entry, entryIndex) => ({
+            opaqueEntryId: `${params.opaquePrefix}-${identifierIndex + 1}:${entryIndex + 1}`,
+            kind: entry.kind,
+            value: entry.value,
+            dangerous: entry.dangerous,
+            sensitivity: entry.sensitivity,
+          }))
+      );
+    }),
+  );
+  return normalized.flat();
+}
+
+async function originSubjectMatched(input: ChannelIngressStateInput): Promise<boolean> {
   const origin = input.event.originSubject;
   if (!origin) {
     return false;
   }
-  const current = subjectIdentifierKeys(input.subject);
-  return origin.identifiers.some((identifier) =>
-    current.has(`${identifier.kind}:${identifier.value}`),
-  );
+  if (
+    origin.identifiers.some((identifier) =>
+      subjectHasExactIdentifier({
+        subject: input.subject,
+        identifier,
+      }),
+    )
+  ) {
+    return true;
+  }
+
+  const context = eventSubjectMatchContext(input);
+  const originEntries = await normalizeSubjectIdentifiersForMatch({
+    input,
+    subject: origin,
+    context,
+    opaquePrefix: "origin",
+  });
+  if (originEntries.length > 0) {
+    const currentMatch = await input.adapter.matchSubject({
+      subject: input.subject,
+      entries: originEntries,
+      context,
+    });
+    if (currentMatch.matched) {
+      return true;
+    }
+  }
+
+  const currentEntries = await normalizeSubjectIdentifiersForMatch({
+    input,
+    subject: input.subject,
+    context,
+    opaquePrefix: "current",
+  });
+  if (currentEntries.length === 0) {
+    return false;
+  }
+  const originMatch = await input.adapter.matchSubject({
+    subject: origin,
+    entries: currentEntries,
+    context,
+  });
+  return originMatch.matched;
 }
 
 async function resolveAccessGroupEntries(params: {
@@ -285,26 +366,28 @@ async function resolveRouteFacts(
 export async function resolveChannelIngressState(
   input: ChannelIngressStateInput,
 ): Promise<ChannelIngressState> {
-  const [dm, pairingStore, group, commandOwner, commandGroup, routeFacts] = await Promise.all([
-    resolveIngressAllowlist({ input, rawEntries: dmEntries(input), context: "dm" }),
-    resolveIngressAllowlist({
-      input,
-      rawEntries: input.allowlists.pairingStore,
-      context: "dm",
-    }),
-    resolveIngressAllowlist({ input, rawEntries: groupEntries(input), context: "group" }),
-    resolveIngressAllowlist({
-      input,
-      rawEntries: input.allowlists.commandOwner,
-      context: "command",
-    }),
-    resolveIngressAllowlist({
-      input,
-      rawEntries: input.allowlists.commandGroup,
-      context: "command",
-    }),
-    resolveRouteFacts(input),
-  ]);
+  const [dm, pairingStore, group, commandOwner, commandGroup, routeFacts, eventOriginMatched] =
+    await Promise.all([
+      resolveIngressAllowlist({ input, rawEntries: dmEntries(input), context: "dm" }),
+      resolveIngressAllowlist({
+        input,
+        rawEntries: input.allowlists.pairingStore,
+        context: "dm",
+      }),
+      resolveIngressAllowlist({ input, rawEntries: groupEntries(input), context: "group" }),
+      resolveIngressAllowlist({
+        input,
+        rawEntries: input.allowlists.commandOwner,
+        context: "command",
+      }),
+      resolveIngressAllowlist({
+        input,
+        rawEntries: input.allowlists.commandGroup,
+        context: "command",
+      }),
+      resolveRouteFacts(input),
+      originSubjectMatched(input),
+    ]);
   return {
     channelId: input.channelId,
     accountId: input.accountId,
@@ -314,7 +397,7 @@ export async function resolveChannelIngressState(
       authMode: input.event.authMode,
       mayPair: input.event.mayPair,
       hasOriginSubject: input.event.originSubject != null,
-      originSubjectMatched: originSubjectMatched(input),
+      originSubjectMatched: eventOriginMatched,
     },
     mentionFacts: input.mentionFacts,
     routeFacts,
