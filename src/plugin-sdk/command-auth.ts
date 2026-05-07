@@ -15,7 +15,10 @@ export {
   expandAllowFromWithAccessGroups,
   parseAccessGroupAllowFromEntry,
   resolveAccessGroupAllowFromMatches,
+  resolveAccessGroupAllowFromState,
   type AccessGroupMembershipResolver,
+  type AccessGroupMembershipLookup,
+  type ResolvedAccessGroupAllowFromState,
 } from "./access-groups.js";
 export { buildCommandsPaginationKeyboard } from "./telegram-command-ui.js";
 export {

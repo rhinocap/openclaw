@@ -68,6 +68,9 @@ export const pluginSdkDocMetadata = {
   "channel-pairing": {
     category: "channel",
   },
+  "channel-ingress": {
+    category: "channel",
+  },
   "channel-reply-pipeline": {
     category: "channel",
   },

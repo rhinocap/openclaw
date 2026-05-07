@@ -265,7 +265,9 @@ export function createPluginRuntimeMock(overrides: DeepPartial<PluginRuntime> = 
         OriginatingChannel: params.channel,
         OriginatingTo: params.reply.originatingTo,
         CommandAuthorized: params.access?.commands
-          ? params.access.commands.authorizers.some((entry) => entry.allowed)
+          ? (params.access.commands.authorized ??
+            params.access.commands.authorizers?.some((entry) => entry.allowed) ??
+            false)
           : false,
         ...params.extra,
       }) as ReturnType<PluginRuntime["channel"]["turn"]["buildContext"]>,

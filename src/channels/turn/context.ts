@@ -51,7 +51,10 @@ function commandAuthorized(access: AccessFacts | undefined): boolean | undefined
   if (!commands) {
     return undefined;
   }
-  return commands.authorizers.some((entry) => entry.allowed);
+  if (typeof commands.authorized === "boolean") {
+    return commands.authorized;
+  }
+  return commands.authorizers?.some((entry) => entry.allowed);
 }
 
 function keepSupplementalContext(params: {
