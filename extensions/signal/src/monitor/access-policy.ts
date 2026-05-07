@@ -13,6 +13,7 @@ import {
   type IngressReasonCode,
 } from "openclaw/plugin-sdk/channel-ingress";
 import { createChannelPairingChallengeIssuer } from "openclaw/plugin-sdk/channel-pairing";
+import type { AccessGroupsConfig } from "openclaw/plugin-sdk/config-types";
 import { upsertChannelPairingRequest } from "openclaw/plugin-sdk/conversation-runtime";
 import {
   DM_GROUP_ACCESS_REASON,
@@ -292,6 +293,7 @@ export async function resolveSignalAccessState(params: {
   groupAllowFrom: string[];
   sender: SignalSender;
   groupId?: string;
+  accessGroups?: AccessGroupsConfig;
   hasControlCommand?: boolean;
   useAccessGroups?: boolean;
 }) {
@@ -326,6 +328,7 @@ export async function resolveSignalAccessState(params: {
         id: params.sender.raw,
       },
       adapter: signalIngressAdapter,
+      accessGroups: params.accessGroups,
       event: {
         kind: "message",
         authMode: "inbound",
@@ -348,6 +351,7 @@ export async function resolveSignalAccessState(params: {
         id: params.groupId ?? "unknown",
       },
       adapter: signalIngressAdapter,
+      accessGroups: params.accessGroups,
       event: {
         kind: "message",
         authMode: "inbound",

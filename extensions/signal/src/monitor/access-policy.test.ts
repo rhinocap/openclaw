@@ -1,3 +1,4 @@
+import type { AccessGroupsConfig } from "openclaw/plugin-sdk/config-types";
 import { readStoreAllowFromForDmPolicy } from "openclaw/plugin-sdk/security-runtime";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { handleSignalDirectMessageAccess, resolveSignalAccessState } from "./access-policy.js";
@@ -23,6 +24,7 @@ async function resolveGroupAccess(params: {
   allowFrom?: string[];
   groupAllowFrom?: string[];
   groupId?: string;
+  accessGroups?: AccessGroupsConfig;
 }) {
   const access = await resolveSignalAccessState({
     accountId: "default",
@@ -32,6 +34,7 @@ async function resolveGroupAccess(params: {
     groupAllowFrom: params.groupAllowFrom ?? [],
     sender: SIGNAL_SENDER,
     groupId: params.groupId,
+    accessGroups: params.accessGroups,
   });
   return {
     ...access,
@@ -102,6 +105,44 @@ describe("resolveSignalAccessState", () => {
     });
 
     expect(dmAccess.decision).toBe("block");
+  });
+
+  it("allows direct messages through static message sender access groups", async () => {
+    const { dmAccess } = await resolveSignalAccessState({
+      accountId: "default",
+      dmPolicy: "allowlist",
+      groupPolicy: "allowlist",
+      allowFrom: ["accessGroup:operators"],
+      groupAllowFrom: [],
+      sender: SIGNAL_SENDER,
+      accessGroups: {
+        operators: {
+          type: "message.senders",
+          members: {
+            signal: [SIGNAL_SENDER.e164],
+          },
+        },
+      },
+    });
+
+    expect(dmAccess.decision).toBe("allow");
+  });
+
+  it("allows group messages through static message sender access groups", async () => {
+    const { groupDecision } = await resolveGroupAccess({
+      groupAllowFrom: ["accessGroup:operators"],
+      groupId: SIGNAL_GROUP_ID,
+      accessGroups: {
+        operators: {
+          type: "message.senders",
+          members: {
+            signal: [SIGNAL_SENDER.e164],
+          },
+        },
+      },
+    });
+
+    expect(groupDecision.decision).toBe("allow");
   });
 
   it("allows paired direct senders from the pairing store", async () => {

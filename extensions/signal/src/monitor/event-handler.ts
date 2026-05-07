@@ -565,6 +565,7 @@ export function createSignalEventHandler(deps: SignalEventHandlerDeps) {
         groupAllowFrom: deps.groupAllowFrom,
         sender,
         groupId,
+        accessGroups: deps.cfg.accessGroups,
         hasControlCommand: hasControlCommandInMessage,
         useAccessGroups: deps.cfg.commands?.useAccessGroups !== false,
       });
