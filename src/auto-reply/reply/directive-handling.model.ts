@@ -6,6 +6,12 @@ import {
   resolveConfiguredModelRef,
   resolveModelRefFromString,
 } from "../../agents/model-selection.js";
+import {
+  listOpenAIAuthProfileProvidersForAgentRuntime,
+  openAIProviderUsesCodexRuntimeByDefault,
+  OPENAI_CODEX_PROVIDER_ID,
+  OPENAI_PROVIDER_ID,
+} from "../../agents/openai-codex-routing.js";
 import { getChannelPlugin } from "../../channels/plugins/index.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
@@ -28,6 +34,63 @@ import {
 } from "./directive-handling.model-picker.js";
 export { resolveModelSelectionFromDirective } from "./directive-handling.model-selection.js";
 import type { InlineDirectives } from "./directive-handling.parse.js";
+
+function isMissingAuthLabel(auth: { label: string; source: string }): boolean {
+  return auth.label === "missing" && auth.source === "missing";
+}
+
+async function resolveStatusAuthLabel(params: {
+  provider: string;
+  cfg: OpenClawConfig;
+  modelsPath: string;
+  agentDir: string;
+  authMode: ModelAuthDetailMode;
+  workspaceDir?: string;
+  sessionEntry?: Pick<SessionEntry, "agentHarnessId" | "agentRuntimeOverride">;
+}): Promise<string> {
+  const auth = await resolveAuthLabel(
+    params.provider,
+    params.cfg,
+    params.modelsPath,
+    params.agentDir,
+    params.authMode,
+    params.workspaceDir,
+  );
+  if (!isMissingAuthLabel(auth)) {
+    return formatAuthLabel(auth);
+  }
+
+  const provider = normalizeProviderId(params.provider);
+  if (
+    provider !== OPENAI_PROVIDER_ID ||
+    !openAIProviderUsesCodexRuntimeByDefault({ provider, config: params.cfg })
+  ) {
+    return formatAuthLabel(auth);
+  }
+
+  const runtimeProviders = listOpenAIAuthProfileProvidersForAgentRuntime({
+    provider,
+    harnessRuntime: params.cfg.agents?.defaults?.agentRuntime?.id,
+    sessionAgentHarnessId: params.sessionEntry?.agentHarnessId,
+    sessionAgentRuntimeOverride: params.sessionEntry?.agentRuntimeOverride,
+  });
+  if (!runtimeProviders.includes(OPENAI_CODEX_PROVIDER_ID)) {
+    return formatAuthLabel(auth);
+  }
+
+  const runtimeAuth = await resolveAuthLabel(
+    OPENAI_CODEX_PROVIDER_ID,
+    params.cfg,
+    params.modelsPath,
+    params.agentDir,
+    params.authMode,
+    params.workspaceDir,
+  );
+  if (isMissingAuthLabel(runtimeAuth)) {
+    return formatAuthLabel(auth);
+  }
+  return `via codex runtime / ${OPENAI_CODEX_PROVIDER_ID} ${formatAuthLabel(runtimeAuth)}`;
+}
 
 function pushUniqueCatalogEntry(params: {
   keys: Set<string>;
@@ -204,7 +267,8 @@ export async function maybeHandleModelDirectiveInfo(params: {
   resetModelOverride: boolean;
   workspaceDir?: string;
   surface?: string;
-  sessionEntry?: Pick<SessionEntry, "modelProvider" | "model">;
+  sessionEntry?: Pick<SessionEntry, "modelProvider" | "model"> &
+    Partial<Pick<SessionEntry, "agentHarnessId" | "agentRuntimeOverride">>;
 }): Promise<ReplyPayload | undefined> {
   if (!params.directives.hasModelDirective) {
     return undefined;
@@ -302,15 +366,16 @@ export async function maybeHandleModelDirectiveInfo(params: {
     if (authByProvider.has(provider)) {
       continue;
     }
-    const auth = await resolveAuthLabel(
+    const authLabel = await resolveStatusAuthLabel({
       provider,
-      params.cfg,
+      cfg: params.cfg,
       modelsPath,
-      params.agentDir,
+      agentDir: params.agentDir,
       authMode,
-      params.workspaceDir,
-    );
-    authByProvider.set(provider, formatAuthLabel(auth));
+      workspaceDir: params.workspaceDir,
+      sessionEntry: params.sessionEntry,
+    });
+    authByProvider.set(provider, authLabel);
   }
 
   const modelRefs = resolveSelectedAndActiveModel({
