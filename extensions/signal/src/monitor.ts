@@ -43,6 +43,7 @@ import type {
   SignalReactionMessage,
   SignalReactionTarget,
 } from "./monitor/event-handler.types.js";
+import { createSignalMonitorTaskRunner } from "./monitor/task-runner.js";
 import { sendMessageSignal } from "./send.js";
 import { runSignalSseLoop } from "./sse-reconnect.js";
 
@@ -428,6 +429,7 @@ export async function monitorSignalProvider(opts: MonitorSignalOpts = {}): Promi
   );
   const readReceiptsViaDaemon = autoStart && sendReadReceipts;
   const daemonLifecycle = createSignalDaemonLifecycle({ abortSignal: opts.abortSignal });
+  const monitorTaskRunner = createSignalMonitorTaskRunner(runtime);
   let daemonHandle: SignalDaemonHandle | null = null;
 
   if (autoStart) {
@@ -508,9 +510,7 @@ export async function monitorSignalProvider(opts: MonitorSignalOpts = {}): Promi
       timeoutMs: 0,
       policy: opts.reconnectPolicy,
       onEvent: (event) => {
-        void handleEvent(event).catch((err) => {
-          runtime.error?.(`event handler failed: ${String(err)}`);
-        });
+        monitorTaskRunner.runEventTask(() => handleEvent(event));
       },
     });
     const daemonExitError = daemonLifecycle.getExitError();
@@ -524,6 +524,7 @@ export async function monitorSignalProvider(opts: MonitorSignalOpts = {}): Promi
     }
     throw err;
   } finally {
+    await monitorTaskRunner.waitForIdle();
     daemonLifecycle.dispose();
     opts.abortSignal?.removeEventListener("abort", onAbort);
     daemonLifecycle.stop();

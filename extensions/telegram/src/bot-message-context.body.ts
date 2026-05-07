@@ -8,7 +8,6 @@ import {
   type NormalizedLocation,
 } from "openclaw/plugin-sdk/channel-inbound";
 import { resolveChannelGroupPolicy } from "openclaw/plugin-sdk/channel-policy";
-import { resolveControlCommandGate } from "openclaw/plugin-sdk/command-auth-native";
 import { hasControlCommand } from "openclaw/plugin-sdk/command-detection";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-types";
 import type {
@@ -47,6 +46,7 @@ import {
 } from "./bot/body-helpers.js";
 import { buildTelegramGroupPeerId } from "./bot/helpers.js";
 import type { TelegramContext } from "./bot/types.js";
+import { resolveTelegramCommandIngressAuthorization } from "./command-ingress.js";
 import { isTelegramForumServiceMessage } from "./forum-service-message.js";
 
 type StickerVisionRuntime = typeof import("./sticker-vision.runtime.js");
@@ -193,11 +193,23 @@ export async function resolveTelegramInboundBody(params: {
   const hasControlCommandInMessage = hasControlCommand(messageTextParts.text, cfg, {
     botUsername,
   });
-  const commandGate = resolveControlCommandGate({
+  const commandGate = await resolveTelegramCommandIngressAuthorization({
+    accountId: accountId ?? "default",
+    cfg,
+    dmPolicy: "pairing",
+    isGroup,
+    chatId,
+    resolvedThreadId,
+    senderId,
+    effectiveDmAllow,
+    effectiveGroupAllow,
+    ownerAccess: { ownerList: [], senderIsOwner: false },
     useAccessGroups,
-    authorizers: [{ configured: allowForCommands.hasEntries, allowed: senderAllowedForCommands }],
+    eventKind: "message",
     allowTextCommands: true,
     hasControlCommand: hasControlCommandInMessage,
+    modeWhenAccessGroupsOff: "allow",
+    includeDmAllowForGroupCommands: false,
   });
   const commandAuthorized = commandGate.commandAuthorized;
   const historyKey = isGroup ? buildTelegramGroupPeerId(chatId, resolvedThreadId) : undefined;
@@ -314,7 +326,7 @@ export async function resolveTelegramInboundBody(params: {
   });
   const wasMentioned = options?.forceWasMentioned === true ? true : computedWasMentioned;
 
-  if (isGroup && commandGate.shouldBlock) {
+  if (isGroup && commandGate.shouldBlockControlCommand) {
     logInboundDrop({
       log: logVerbose,
       channel: "telegram",

@@ -44,9 +44,9 @@ import {
 } from "./model-picker.js";
 import {
   authorizeMattermostCommandInvocation,
-  isMattermostSenderAllowed,
   normalizeMattermostAllowEntry,
   normalizeMattermostAllowList,
+  resolveMattermostMonitorInboundAccess,
 } from "./monitor-auth.js";
 import {
   evaluateMattermostMentionGate,
@@ -82,8 +82,6 @@ import {
   createChannelPairingController,
   createChannelMessageReplyPipeline,
   DEFAULT_GROUP_HISTORY_LIMIT,
-  DM_GROUP_ACCESS_REASON,
-  isDangerousNameMatchingEnabled,
   logInboundDrop,
   logTypingFailure,
   readStoreAllowFromForDmPolicy,
@@ -91,9 +89,7 @@ import {
   registerPluginHttpRoute,
   resolveAllowlistProviderRuntimeGroupPolicy,
   resolveChannelMediaMaxBytes,
-  resolveControlCommandGate,
   resolveDefaultGroupPolicy,
-  resolveDmGroupAccessWithLists,
   warnMissingProviderGroupPolicyFallbackOnce,
   type HistoryEntry,
 } from "./runtime-api.js";
@@ -483,7 +479,6 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
     channel: "mattermost",
     accountId: account.accountId,
   });
-  const allowNameMatching = isDangerousNameMatchingEnabled(account.config);
   const botToken =
     normalizeOptionalString(opts.botToken) ?? normalizeOptionalString(account.botToken);
   if (!botToken) {
@@ -600,7 +595,7 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
           cfg,
           surface: "mattermost",
         });
-        const decision = authorizeMattermostCommandInvocation({
+        const decision = await authorizeMattermostCommandInvocation({
           account,
           cfg,
           senderId: payload.user_id,
@@ -1048,7 +1043,7 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
         readStore: pairing.readStoreForDmPolicy,
       }),
     );
-    const auth = authorizeMattermostCommandInvocation({
+    const auth = await authorizeMattermostCommandInvocation({
       account,
       cfg,
       senderId: params.payload.user_id,
@@ -1272,10 +1267,6 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
           senderId;
         const rawText = normalizeOptionalString(post.message) ?? "";
         const dmPolicy = account.config.dmPolicy ?? "pairing";
-        const normalizedAllowFrom = normalizeMattermostAllowList(account.config.allowFrom ?? []);
-        const normalizedGroupAllowFrom = normalizeMattermostAllowList(
-          account.config.groupAllowFrom ?? [],
-        );
         const storeAllowFrom = normalizeMattermostAllowList(
           await readStoreAllowFromForDmPolicy({
             provider: "mattermost",
@@ -1284,64 +1275,35 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
             readStore: pairing.readStoreForDmPolicy,
           }),
         );
-        const accessDecision = resolveDmGroupAccessWithLists({
-          isGroup: kind !== "direct",
-          dmPolicy,
-          groupPolicy,
-          allowFrom: normalizedAllowFrom,
-          groupAllowFrom: normalizedGroupAllowFrom,
-          storeAllowFrom,
-          isSenderAllowed: (allowFrom) =>
-            isMattermostSenderAllowed({
-              senderId,
-              senderName,
-              allowFrom,
-              allowNameMatching,
-            }),
-        });
-        const effectiveAllowFrom = accessDecision.effectiveAllowFrom;
-        const effectiveGroupAllowFrom = accessDecision.effectiveGroupAllowFrom;
         const allowTextCommands = core.channel.commands.shouldHandleTextCommands({
           cfg,
           surface: "mattermost",
         });
         const hasControlCommand = core.channel.text.hasControlCommand(rawText, cfg);
         const isControlCommand = allowTextCommands && hasControlCommand;
-        const useAccessGroups = cfg.commands?.useAccessGroups !== false;
-        const commandDmAllowFrom = kind === "direct" ? effectiveAllowFrom : normalizedAllowFrom;
-        const senderAllowedForCommands = isMattermostSenderAllowed({
+        const accessDecision = await resolveMattermostMonitorInboundAccess({
+          account,
+          cfg,
           senderId,
           senderName,
-          allowFrom: commandDmAllowFrom,
-          allowNameMatching,
-        });
-        const groupAllowedForCommands = isMattermostSenderAllowed({
-          senderId,
-          senderName,
-          allowFrom: effectiveGroupAllowFrom,
-          allowNameMatching,
-        });
-        const commandGate = resolveControlCommandGate({
-          useAccessGroups,
-          authorizers: [
-            { configured: commandDmAllowFrom.length > 0, allowed: senderAllowedForCommands },
-            {
-              configured: effectiveGroupAllowFrom.length > 0,
-              allowed: groupAllowedForCommands,
-            },
-          ],
+          channelId,
+          kind,
+          groupPolicy,
+          storeAllowFrom,
           allowTextCommands,
           hasControlCommand,
+          eventKind: "message",
+          mayPair: true,
         });
-        const commandAuthorized = commandGate.commandAuthorized;
+        const commandAuthorized = accessDecision.commandAuthorized;
 
-        if (accessDecision.decision !== "allow") {
+        if (accessDecision.decision.decision !== "allow") {
           if (kind === "direct") {
-            if (accessDecision.reasonCode === DM_GROUP_ACCESS_REASON.DM_POLICY_DISABLED) {
+            if (accessDecision.reasonCode === "dm_policy_disabled") {
               logVerboseMessage(`mattermost: drop dm (dmPolicy=disabled sender=${senderId})`);
               return;
             }
-            if (accessDecision.decision === "pairing") {
+            if (accessDecision.decision.decision === "pairing") {
               const { code, created } = await pairing.upsertPairingRequest({
                 id: senderId,
                 meta: { name: senderName },
@@ -1372,15 +1334,15 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
             logVerboseMessage(`mattermost: drop dm sender=${senderId} (dmPolicy=${dmPolicy})`);
             return;
           }
-          if (accessDecision.reasonCode === DM_GROUP_ACCESS_REASON.GROUP_POLICY_DISABLED) {
+          if (accessDecision.reasonCode === "group_policy_disabled") {
             logVerboseMessage("mattermost: drop group message (groupPolicy=disabled)");
             return;
           }
-          if (accessDecision.reasonCode === DM_GROUP_ACCESS_REASON.GROUP_POLICY_EMPTY_ALLOWLIST) {
+          if (accessDecision.reasonCode === "group_policy_empty_allowlist") {
             logVerboseMessage("mattermost: drop group message (no group allowlist)");
             return;
           }
-          if (accessDecision.reasonCode === DM_GROUP_ACCESS_REASON.GROUP_POLICY_NOT_ALLOWLISTED) {
+          if (accessDecision.reasonCode === "group_policy_not_allowlisted") {
             logVerboseMessage(`mattermost: drop group sender=${senderId} (not in groupAllowFrom)`);
             return;
           }
@@ -1390,7 +1352,7 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
           return;
         }
 
-        if (kind !== "direct" && commandGate.shouldBlock) {
+        if (kind !== "direct" && accessDecision.shouldBlockControlCommand) {
           logInboundDrop({
             log: logVerboseMessage,
             channel: "mattermost",
@@ -1981,22 +1943,21 @@ export async function monitorMattermostProvider(opts: MonitorMattermostOpts = {}
         readStore: pairing.readStoreForDmPolicy,
       }),
     );
-    const reactionAccess = resolveDmGroupAccessWithLists({
-      isGroup: kind !== "direct",
-      dmPolicy,
+    const reactionAccess = await resolveMattermostMonitorInboundAccess({
+      account,
+      cfg,
+      senderId: userId,
+      senderName,
+      channelId,
+      kind,
       groupPolicy,
-      allowFrom: normalizeMattermostAllowList(account.config.allowFrom ?? []),
-      groupAllowFrom: normalizeMattermostAllowList(account.config.groupAllowFrom ?? []),
       storeAllowFrom,
-      isSenderAllowed: (allowFrom) =>
-        isMattermostSenderAllowed({
-          senderId: userId,
-          senderName,
-          allowFrom,
-          allowNameMatching,
-        }),
+      allowTextCommands: false,
+      hasControlCommand: false,
+      eventKind: "reaction",
+      mayPair: false,
     });
-    if (reactionAccess.decision !== "allow") {
+    if (reactionAccess.decision.decision !== "allow") {
       if (kind === "direct") {
         logVerboseMessage(
           `mattermost: drop reaction (dmPolicy=${dmPolicy} sender=${userId} reason=${reactionAccess.reason})`,

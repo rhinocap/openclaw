@@ -3,7 +3,6 @@ import {
   readStoreAllowFromForDmPolicy,
   resolveEffectiveAllowFromLists,
 } from "openclaw/plugin-sdk/channel-policy";
-import { resolveControlCommandGate } from "openclaw/plugin-sdk/command-auth";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-types";
 import { isDangerousNameMatchingEnabled } from "openclaw/plugin-sdk/dangerous-name-runtime";
 import {
@@ -21,6 +20,7 @@ import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
 } from "openclaw/plugin-sdk/text-runtime";
+import { resolveIrcCommandAccess } from "./access-policy.js";
 import type { ResolvedIrcAccount } from "./accounts.js";
 import { normalizeIrcAllowlist, resolveIrcAllowlistMatch } from "./normalize.js";
 import {
@@ -171,24 +171,18 @@ export async function handleIrcInbound(params: {
     surface: CHANNEL_ID,
   });
   const useAccessGroups = config.commands?.useAccessGroups !== false;
-  const senderAllowedForCommands = resolveIrcAllowlistMatch({
-    allowFrom: message.isGroup ? effectiveGroupAllowFrom : effectiveAllowFrom,
-    message,
-    allowNameMatching,
-  }).allowed;
   const hasControlCommand = core.channel.text.hasControlCommand(rawBody, config as OpenClawConfig);
-  const commandGate = resolveControlCommandGate({
-    useAccessGroups,
-    authorizers: [
-      {
-        configured: (message.isGroup ? effectiveGroupAllowFrom : effectiveAllowFrom).length > 0,
-        allowed: senderAllowedForCommands,
-      },
-    ],
+  const commandAccess = await resolveIrcCommandAccess({
+    accountId: account.accountId,
+    message,
+    effectiveAllowFrom,
+    effectiveGroupAllowFrom,
+    allowNameMatching,
     allowTextCommands,
     hasControlCommand,
+    useAccessGroups,
   });
-  const commandAuthorized = commandGate.commandAuthorized;
+  const commandAuthorized = commandAccess.commandAuthorized;
 
   if (message.isGroup) {
     const senderAllowed = resolveIrcGroupSenderAllowed({
@@ -238,7 +232,7 @@ export async function handleIrcInbound(params: {
     }
   }
 
-  if (message.isGroup && commandGate.shouldBlock) {
+  if (message.isGroup && commandAccess.shouldBlockControlCommand) {
     const { logInboundDrop } = await import("openclaw/plugin-sdk/channel-inbound");
     logInboundDrop({
       log: (line) => runtime.log?.(line),

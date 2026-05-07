@@ -16,7 +16,6 @@ import {
   resolveChannelGroupPolicy,
   resolveChannelGroupRequireMention,
 } from "openclaw/plugin-sdk/channel-policy";
-import { resolveControlCommandGate } from "openclaw/plugin-sdk/command-auth";
 import { hasControlCommand } from "openclaw/plugin-sdk/command-auth";
 import { recordInboundSession } from "openclaw/plugin-sdk/conversation-runtime";
 import {
@@ -48,7 +47,6 @@ import {
   formatSignalPairingIdLine,
   formatSignalSenderDisplay,
   formatSignalSenderId,
-  isSignalSenderAllowed,
   normalizeSignalAllowRecipient,
   resolveSignalPeerId,
   resolveSignalRecipient,
@@ -555,23 +553,21 @@ export function createSignalEventHandler(deps: SignalEventHandlerDeps) {
     const messageText = normalizedMessage.trim();
     const groupId = dataMessage?.groupInfo?.groupId ?? reaction?.groupInfo?.groupId ?? undefined;
     const isGroup = Boolean(groupId);
+    const hasControlCommandInMessage = hasControlCommand(messageText, deps.cfg);
 
     const senderDisplay = formatSignalSenderDisplay(sender);
-    const {
-      resolveAccessDecision,
-      isGroupAllowed,
-      dmAccess,
-      effectiveDmAllow,
-      effectiveGroupAllow,
-    } = await resolveSignalAccessState({
-      accountId: deps.accountId,
-      dmPolicy: deps.dmPolicy,
-      groupPolicy: deps.groupPolicy,
-      allowFrom: deps.allowFrom,
-      groupAllowFrom: deps.groupAllowFrom,
-      sender,
-      groupId,
-    });
+    const { resolveAccessDecision, dmAccess, effectiveGroupAllow, resolveCommandAccess } =
+      await resolveSignalAccessState({
+        accountId: deps.accountId,
+        dmPolicy: deps.dmPolicy,
+        groupPolicy: deps.groupPolicy,
+        allowFrom: deps.allowFrom,
+        groupAllowFrom: deps.groupAllowFrom,
+        sender,
+        groupId,
+        hasControlCommand: hasControlCommandInMessage,
+        useAccessGroups: deps.cfg.commands?.useAccessGroups !== false,
+      });
     const quoteText = normalizeOptionalString(dataMessage?.quote?.text) ?? "";
     const { contextVisibilityMode, quoteSenderAllowed, visibleQuoteText, visibleQuoteSender } =
       resolveSignalQuoteContext({
@@ -654,22 +650,9 @@ export function createSignalEventHandler(deps: SignalEventHandlerDeps) {
       }
     }
 
-    const useAccessGroups = deps.cfg.commands?.useAccessGroups !== false;
-    const commandDmAllow = isGroup ? deps.allowFrom : effectiveDmAllow;
-    const ownerAllowedForCommands = isSignalSenderAllowed(sender, commandDmAllow);
-    const groupAllowedForCommands = isGroupAllowed(effectiveGroupAllow);
-    const hasControlCommandInMessage = hasControlCommand(messageText, deps.cfg);
-    const commandGate = resolveControlCommandGate({
-      useAccessGroups,
-      authorizers: [
-        { configured: commandDmAllow.length > 0, allowed: ownerAllowedForCommands },
-        { configured: effectiveGroupAllow.length > 0, allowed: groupAllowedForCommands },
-      ],
-      allowTextCommands: true,
-      hasControlCommand: hasControlCommandInMessage,
-    });
-    const commandAuthorized = commandGate.commandAuthorized;
-    if (isGroup && commandGate.shouldBlock) {
+    const commandAccess = resolveCommandAccess(isGroup);
+    const commandAuthorized = commandAccess.commandAuthorized;
+    if (isGroup && commandAccess.shouldBlockControlCommand) {
       logInboundDrop({
         log: logVerbose,
         channel: "signal",

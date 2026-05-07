@@ -59,12 +59,12 @@ describe("resolveIMessageInboundDecision echo detection", () => {
     return resolveIMessageInboundDecision(createInboundDecisionParams(overrides));
   }
 
-  it("drops inbound messages when outbound message id matches echo cache", () => {
+  it("drops inbound messages when outbound message id matches echo cache", async () => {
     const echoHas = vi.fn((_scope: string, lookup: { text?: string; messageId?: string }) => {
       return lookup.messageId === "42";
     });
 
-    const decision = resolveDecision({
+    const decision = await resolveDecision({
       message: {
         id: 42,
         text: "Reasoning:\n_step_",
@@ -81,12 +81,12 @@ describe("resolveIMessageInboundDecision echo detection", () => {
     expect(echoHas).toHaveBeenCalledTimes(1);
   });
 
-  it("matches attachment-only echoes by bodyText placeholder", () => {
+  it("matches attachment-only echoes by bodyText placeholder", async () => {
     const echoHas = vi.fn((_scope: string, lookup: { text?: string; messageId?: string }) => {
       return lookup.text === "<media:image>" && lookup.messageId === "42";
     });
 
-    const decision = resolveDecision({
+    const decision = await resolveDecision({
       message: {
         id: 42,
         text: "",
@@ -111,12 +111,12 @@ describe("resolveIMessageInboundDecision echo detection", () => {
     );
   });
 
-  it("drops reflected self-chat duplicates after seeing the from-me copy", () => {
+  it("drops reflected self-chat duplicates after seeing the from-me copy", async () => {
     const selfChatCache = createSelfChatCache();
     const createdAt = "2026-03-02T20:58:10.649Z";
 
     expect(
-      resolveDecision({
+      await resolveDecision({
         message: {
           id: 9641,
           sender: "+15555550123",
@@ -133,7 +133,7 @@ describe("resolveIMessageInboundDecision echo detection", () => {
     ).toMatchObject({ kind: "dispatch" });
 
     expect(
-      resolveDecision({
+      await resolveDecision({
         message: {
           id: 9642,
           sender: "+15555550123",
@@ -148,10 +148,10 @@ describe("resolveIMessageInboundDecision echo detection", () => {
     ).toEqual({ kind: "drop", reason: "self-chat echo" });
   });
 
-  it("does not drop same-text messages when created_at differs", () => {
+  it("does not drop same-text messages when created_at differs", async () => {
     const selfChatCache = createSelfChatCache();
 
-    resolveDecision({
+    await resolveDecision({
       message: {
         id: 9641,
         text: "ok",
@@ -161,7 +161,7 @@ describe("resolveIMessageInboundDecision echo detection", () => {
       selfChatCache,
     });
 
-    const decision = resolveDecision({
+    const decision = await resolveDecision({
       message: {
         id: 9642,
         text: "ok",
@@ -173,7 +173,7 @@ describe("resolveIMessageInboundDecision echo detection", () => {
     expect(decision.kind).toBe("dispatch");
   });
 
-  it("keeps self-chat cache scoped to configured group threads", () => {
+  it("keeps self-chat cache scoped to configured group threads", async () => {
     const selfChatCache = createSelfChatCache();
     const groupedCfg = {
       channels: {
@@ -188,7 +188,7 @@ describe("resolveIMessageInboundDecision echo detection", () => {
     const createdAt = "2026-03-02T20:58:10.649Z";
 
     expect(
-      resolveDecision({
+      await resolveDecision({
         cfg: groupedCfg,
         message: {
           id: 9701,
@@ -201,7 +201,7 @@ describe("resolveIMessageInboundDecision echo detection", () => {
       }),
     ).toEqual({ kind: "drop", reason: "from me" });
 
-    const decision = resolveDecision({
+    const decision = await resolveDecision({
       cfg: groupedCfg,
       message: {
         id: 9702,
@@ -215,12 +215,12 @@ describe("resolveIMessageInboundDecision echo detection", () => {
     expect(decision.kind).toBe("dispatch");
   });
 
-  it("does not drop other participants in the same group thread", () => {
+  it("does not drop other participants in the same group thread", async () => {
     const selfChatCache = createSelfChatCache();
     const createdAt = "2026-03-02T20:58:10.649Z";
 
     expect(
-      resolveDecision({
+      await resolveDecision({
         message: {
           id: 9751,
           chat_id: 123,
@@ -233,7 +233,7 @@ describe("resolveIMessageInboundDecision echo detection", () => {
       }),
     ).toEqual({ kind: "drop", reason: "from me" });
 
-    const decision = resolveDecision({
+    const decision = await resolveDecision({
       message: {
         id: 9752,
         chat_id: 123,
@@ -248,13 +248,13 @@ describe("resolveIMessageInboundDecision echo detection", () => {
     expect(decision.kind).toBe("dispatch");
   });
 
-  it("sanitizes reflected duplicate previews before logging", () => {
+  it("sanitizes reflected duplicate previews before logging", async () => {
     const selfChatCache = createSelfChatCache();
     const logVerbose = vi.fn();
     const createdAt = "2026-03-02T20:58:10.649Z";
     const bodyText = "line-1\nline-2\t\u001b[31mred";
 
-    resolveDecision({
+    await resolveDecision({
       message: {
         id: 9801,
         sender: "+15555550123",
@@ -270,7 +270,7 @@ describe("resolveIMessageInboundDecision echo detection", () => {
       logVerbose,
     });
 
-    resolveDecision({
+    await resolveDecision({
       message: {
         id: 9802,
         sender: "+15555550123",
@@ -333,8 +333,8 @@ describe("resolveIMessageInboundDecision command auth", () => {
       logVerbose: undefined,
     });
 
-  it("does not auto-authorize DM commands in open mode without allowlists", () => {
-    const decision = resolveDmCommandDecision({
+  it("does not auto-authorize DM commands in open mode without allowlists", async () => {
+    const decision = await resolveDmCommandDecision({
       messageId: 100,
       storeAllowFrom: [],
     });
@@ -342,8 +342,8 @@ describe("resolveIMessageInboundDecision command auth", () => {
     expect(decision).toEqual({ kind: "drop", reason: "dmPolicy blocked" });
   });
 
-  it("authorizes DM commands for senders in pairing-mode store allowlist", () => {
-    const decision = resolveDmCommandDecision({
+  it("authorizes DM commands for senders in pairing-mode store allowlist", async () => {
+    const decision = await resolveDmCommandDecision({
       messageId: 101,
       dmPolicy: "pairing",
       storeAllowFrom: ["+15555550123"],

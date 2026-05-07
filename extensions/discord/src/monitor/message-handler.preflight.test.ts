@@ -13,7 +13,8 @@ vi.mock("../pluralkit.js", () => ({
 vi.mock("./preflight-audio.runtime.js", () => ({
   transcribeFirstAudio: transcribeFirstAudioMock,
 }));
-vi.mock("./dm-command-auth.js", () => ({
+vi.mock("./dm-command-auth.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./dm-command-auth.js")>()),
   resolveDiscordDmCommandAccess: resolveDiscordDmCommandAccessMock,
 }));
 vi.mock("./dm-command-decision.js", () => ({

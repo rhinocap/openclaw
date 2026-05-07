@@ -1,3 +1,12 @@
+import {
+  createChannelIngressPluginId,
+  createChannelIngressStringAdapter,
+  createChannelIngressSubject,
+  decideChannelIngress,
+  mapChannelIngressDecisionToTurnAdmission,
+  projectIngressAccessFacts,
+  resolveChannelIngressState,
+} from "openclaw/plugin-sdk/channel-ingress";
 import { dispatchChannelMessageReplyWithBase } from "openclaw/plugin-sdk/channel-message";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-types";
 import {
@@ -8,6 +17,8 @@ import {
 import { buildQaTarget, sendQaBusMessage, type QaBusMessage } from "./bus-client.js";
 import { getQaChannelRuntime } from "./runtime.js";
 import type { CoreConfig, ResolvedQaChannelAccount } from "./types.js";
+
+const qaIngressAdapter = createChannelIngressStringAdapter();
 
 export function isHttpMediaUrl(value: string): boolean {
   try {
@@ -58,6 +69,15 @@ async function resolveQaInboundMediaPayload(attachments: QaBusMessage["attachmen
   return mediaList.length > 0 ? buildAgentMediaPayload(mediaList) : {};
 }
 
+function resolveQaGroupConfig(params: {
+  account: ResolvedQaChannelAccount;
+  conversationId: string;
+  target: string;
+}) {
+  const groups = params.account.config.groups;
+  return groups?.[params.conversationId] ?? groups?.[params.target] ?? groups?.["*"];
+}
+
 export async function handleQaInbound(params: {
   channelId: string;
   channelLabel: string;
@@ -96,6 +116,59 @@ export async function handleQaInbound(params: {
         ),
       )
     : undefined;
+  const accessState = await resolveChannelIngressState({
+    channelId: createChannelIngressPluginId(params.channelId),
+    accountId: params.account.accountId,
+    subject: createChannelIngressSubject({
+      opaqueId: "sender",
+      value: inbound.senderId,
+    }),
+    conversation: {
+      kind: inbound.conversation.kind,
+      id: inbound.conversation.id,
+      threadId: inbound.threadId,
+      title: inbound.conversation.title,
+    },
+    adapter: qaIngressAdapter,
+    event: {
+      kind: "message",
+      authMode: "inbound",
+      mayPair: false,
+    },
+    mentionFacts: isGroup
+      ? {
+          canDetectMention: true,
+          wasMentioned: wasMentioned ?? false,
+        }
+      : undefined,
+    allowlists: {
+      dm: params.account.config.allowFrom,
+      group: params.account.config.groupAllowFrom,
+    },
+  });
+  const groupConfig = isGroup
+    ? resolveQaGroupConfig({
+        account: params.account,
+        conversationId: inbound.conversation.id,
+        target,
+      })
+    : undefined;
+  const accessDecision = decideChannelIngress(accessState, {
+    dmPolicy: "open",
+    groupPolicy: params.account.config.groupPolicy ?? "open",
+    groupAllowFromFallbackToAllowFrom: true,
+    activation: isGroup
+      ? {
+          requireMention: groupConfig?.requireMention ?? false,
+          allowTextCommands: true,
+        }
+      : undefined,
+  });
+  const accessFacts = projectIngressAccessFacts(accessDecision);
+  const admission = mapChannelIngressDecisionToTurnAdmission(accessDecision, { kind: "none" });
+  if (admission.kind !== "dispatch") {
+    return;
+  }
   const storePath = runtime.channel.session.resolveStorePath(params.config.session?.store, {
     agentId: route.agentId,
   });
@@ -147,7 +220,7 @@ export async function handleQaInbound(params: {
     Timestamp: inbound.timestamp,
     OriginatingChannel: params.channelId,
     OriginatingTo: target,
-    CommandAuthorized: true,
+    CommandAuthorized: accessFacts.commands?.authorized ?? true,
     ...mediaPayload,
   });
 

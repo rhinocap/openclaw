@@ -614,6 +614,35 @@ describe("zalouser monitor group mention gating", () => {
     );
   });
 
+  it("allows DM senders from static access groups", async () => {
+    const { dispatchReplyWithBufferedBlockDispatcher } = installRuntime({
+      commandAuthorized: false,
+    });
+    await __testing.processMessage({
+      message: createDmMessage({ senderId: "321" }),
+      account: {
+        ...createAccount(),
+        config: {
+          ...createAccount().config,
+          dmPolicy: "allowlist",
+          allowFrom: ["accessGroup:operators"],
+        },
+      },
+      config: {
+        ...createConfig(),
+        accessGroups: {
+          operators: {
+            type: "message.senders",
+            members: { zalouser: ["321"] },
+          },
+        },
+      },
+      runtime: createRuntimeEnv(),
+    });
+
+    expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
+  });
+
   it("uses commandContent for mention-prefixed control commands", async () => {
     const callArg = await dispatchGroupMessage({
       commandAuthorized: true,
@@ -668,6 +697,40 @@ describe("zalouser monitor group mention gating", () => {
     });
 
     expect(dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
+  });
+
+  it("allows group senders from static access groups", async () => {
+    const { dispatchReplyWithBufferedBlockDispatcher } = installRuntime({
+      commandAuthorized: false,
+    });
+    await __testing.processMessage({
+      message: createGroupMessage({
+        content: "ping @bot",
+        hasAnyMention: true,
+        wasExplicitlyMentioned: true,
+        senderId: "123",
+      }),
+      account: {
+        ...createAccount(),
+        config: {
+          ...createAccount().config,
+          groupPolicy: "allowlist",
+          groupAllowFrom: ["accessGroup:operators"],
+        },
+      },
+      config: {
+        ...createConfig(),
+        accessGroups: {
+          operators: {
+            type: "message.senders",
+            members: { zalouser: ["123"] },
+          },
+        },
+      },
+      runtime: createRuntimeEnv(),
+    });
+
+    expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(1);
   });
 
   it("blocks group messages when sender is not in groupAllowFrom", async () => {

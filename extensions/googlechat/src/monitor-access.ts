@@ -7,17 +7,15 @@ import {
 import {
   GROUP_POLICY_BLOCKED_LABEL,
   createChannelPairingController,
-  evaluateGroupRouteAccessForPolicy,
   isDangerousNameMatchingEnabled,
   resolveAllowlistProviderRuntimeGroupPolicy,
   resolveDefaultGroupPolicy,
-  resolveDmGroupAccessWithLists,
-  resolveSenderScopedGroupPolicy,
   warnMissingProviderGroupPolicyFallbackOnce,
   type OpenClawConfig,
 } from "../runtime-api.js";
 import type { ResolvedGoogleChatAccount } from "./accounts.js";
 import { sendGoogleChatMessage } from "./api.js";
+import { resolveGoogleChatIngressAccess } from "./monitor-ingress.js";
 import type { GoogleChatCoreRuntime } from "./monitor-types.js";
 import { isSenderAllowed } from "./sender-allow.js";
 import type { GoogleChatAnnotation, GoogleChatMessage, GoogleChatSpace } from "./types.js";
@@ -139,6 +137,29 @@ function warnMutableGroupKeysConfigured(
   );
 }
 
+function resolveGroupRouteBlockReason(params: {
+  groupPolicy: "open" | "allowlist" | "disabled";
+  allowlistConfigured: boolean;
+  routeMatched: boolean;
+  routeEnabled: boolean;
+}): "disabled" | "empty_allowlist" | "route_not_allowlisted" | "route_disabled" | null {
+  if (params.groupPolicy === "disabled") {
+    return "disabled";
+  }
+  if (params.routeMatched && !params.routeEnabled) {
+    return "route_disabled";
+  }
+  if (params.groupPolicy === "allowlist") {
+    if (!params.allowlistConfigured) {
+      return "empty_allowlist";
+    }
+    if (!params.routeMatched) {
+      return "route_not_allowlisted";
+    }
+  }
+  return null;
+}
+
 export async function applyGoogleChatInboundAccessPolicy(params: {
   account: ResolvedGoogleChatAccount;
   config: OpenClawConfig;
@@ -216,52 +237,8 @@ export async function applyGoogleChatInboundAccessPolicy(params: {
     isSenderAllowed: isGoogleChatSenderAllowed,
   });
   let effectiveWasMentioned: boolean | undefined;
-
-  if (isGroup) {
-    if (groupConfigResolved.deprecatedNameMatch) {
-      logVerbose(`drop group message (deprecated mutable group key matched, space=${spaceId})`);
-      return { ok: false };
-    }
-    const groupAllowlistConfigured = groupConfigResolved.allowlistConfigured;
-    const routeAccess = evaluateGroupRouteAccessForPolicy({
-      groupPolicy,
-      routeAllowlistConfigured: groupAllowlistConfigured,
-      routeMatched: Boolean(groupEntry),
-      routeEnabled: groupEntry?.enabled !== false,
-    });
-    if (!routeAccess.allowed) {
-      if (routeAccess.reason === "disabled") {
-        logVerbose(`drop group message (groupPolicy=disabled, space=${spaceId})`);
-      } else if (routeAccess.reason === "empty_allowlist") {
-        logVerbose(`drop group message (groupPolicy=allowlist, no allowlist, space=${spaceId})`);
-      } else if (routeAccess.reason === "route_not_allowlisted") {
-        logVerbose(`drop group message (not allowlisted, space=${spaceId})`);
-      } else if (routeAccess.reason === "route_disabled") {
-        logVerbose(`drop group message (space disabled, space=${spaceId})`);
-      }
-      return { ok: false };
-    }
-
-    if (expandedGroupUsers.length > 0) {
-      warnDeprecatedUsersEmailEntries(logVerbose, expandedGroupUsers);
-      const ok = isSenderAllowed(senderId, senderEmail, expandedGroupUsers, allowNameMatching);
-      if (!ok) {
-        logVerbose(`drop group message (sender not allowed, ${senderId})`);
-        return { ok: false };
-      }
-    }
-  }
-
   const dmPolicy = account.config.dm?.policy ?? "pairing";
   const rawConfigAllowFrom = (account.config.dm?.allowFrom ?? []).map((v) => String(v));
-  const normalizedGroupUsers = expandedGroupUsers;
-  const senderGroupPolicy =
-    groupConfigResolved.allowlistConfigured && normalizedGroupUsers.length === 0
-      ? groupPolicy
-      : resolveSenderScopedGroupPolicy({
-          groupPolicy,
-          groupAllowFrom: normalizedGroupUsers,
-        });
   const shouldComputeAuth = core.channel.commands.shouldComputeCommandAuthorized(rawBody, config);
   const storeAllowFrom =
     !isGroup && dmPolicy !== "allowlist" && dmPolicy !== "open"
@@ -285,17 +262,57 @@ export async function applyGoogleChatInboundAccessPolicy(params: {
       isSenderAllowed: isGoogleChatSenderAllowed,
     }),
   ]);
-  const access = resolveDmGroupAccessWithLists({
+  const routeBlockReason = isGroup
+    ? resolveGroupRouteBlockReason({
+        groupPolicy,
+        allowlistConfigured: groupConfigResolved.allowlistConfigured,
+        routeMatched: Boolean(groupEntry),
+        routeEnabled: groupEntry?.enabled !== false,
+      })
+    : null;
+  const { ingress, access } = await resolveGoogleChatIngressAccess({
+    accountId: account.accountId,
+    accessGroups: config.accessGroups,
     isGroup,
+    spaceId,
+    senderId,
+    senderEmail,
+    allowNameMatching,
     dmPolicy,
-    groupPolicy: senderGroupPolicy,
+    groupPolicy,
+    routeAllowlistConfigured: groupConfigResolved.allowlistConfigured,
+    routeMatched: Boolean(groupEntry),
+    routeEnabled: groupEntry?.enabled !== false,
     allowFrom: configAllowFrom,
-    groupAllowFrom: normalizedGroupUsers,
+    groupAllowFrom: expandedGroupUsers,
     storeAllowFrom: effectiveStoreAllowFrom,
-    groupAllowFromFallbackToAllowFrom: false,
-    isSenderAllowed: (allowFrom) =>
-      isSenderAllowed(senderId, senderEmail, allowFrom, allowNameMatching),
   });
+
+  if (isGroup) {
+    if (groupConfigResolved.deprecatedNameMatch) {
+      logVerbose(`drop group message (deprecated mutable group key matched, space=${spaceId})`);
+      return { ok: false };
+    }
+    if (routeBlockReason) {
+      if (routeBlockReason === "disabled") {
+        logVerbose(`drop group message (groupPolicy=disabled, space=${spaceId})`);
+      } else if (routeBlockReason === "empty_allowlist") {
+        logVerbose(`drop group message (groupPolicy=allowlist, no allowlist, space=${spaceId})`);
+      } else if (routeBlockReason === "route_not_allowlisted") {
+        logVerbose(`drop group message (not allowlisted, space=${spaceId})`);
+      } else if (routeBlockReason === "route_disabled") {
+        logVerbose(`drop group message (space disabled, space=${spaceId})`);
+      }
+      return { ok: false };
+    }
+
+    if (expandedGroupUsers.length > 0 && access.decision !== "allow") {
+      warnDeprecatedUsersEmailEntries(logVerbose, expandedGroupUsers);
+      logVerbose(`drop group message (sender not allowed, ${senderId})`);
+      return { ok: false };
+    }
+  }
+
   const effectiveAllowFrom = access.effectiveAllowFrom;
   const effectiveGroupAllowFrom = access.effectiveGroupAllowFrom;
   warnDeprecatedUsersEmailEntries(logVerbose, effectiveAllowFrom);
@@ -347,9 +364,11 @@ export async function applyGoogleChatInboundAccessPolicy(params: {
   }
 
   if (isGroup && access.decision !== "allow") {
-    logVerbose(
-      `drop group message (sender policy blocked, reason=${access.reason}, space=${spaceId})`,
-    );
+    const reason =
+      ingress.reasonCode === "route_sender_empty"
+        ? "groupPolicy=allowlist (empty allowlist)"
+        : access.reason;
+    logVerbose(`drop group message (sender policy blocked, reason=${reason}, space=${spaceId})`);
     return { ok: false };
   }
 

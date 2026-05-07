@@ -17,6 +17,49 @@ beforeEach(() => {
   dispatchChannelMessageReplyWithBaseMock.mockReset();
 });
 
+type HandleQaInboundParams = Parameters<typeof handleQaInbound>[0];
+
+function createQaInboundParams(
+  overrides: {
+    accountConfig?: HandleQaInboundParams["account"]["config"];
+    message?: Partial<HandleQaInboundParams["message"]>;
+  } = {},
+): HandleQaInboundParams {
+  return {
+    channelId: "qa-channel",
+    channelLabel: "QA Channel",
+    account: {
+      accountId: "default",
+      enabled: true,
+      configured: true,
+      baseUrl: "http://127.0.0.1:43123",
+      botUserId: "openclaw",
+      botDisplayName: "OpenClaw QA",
+      pollTimeoutMs: 250,
+      config: {
+        allowFrom: ["*"],
+        ...overrides.accountConfig,
+      },
+    },
+    config: {},
+    message: {
+      id: "msg-1",
+      accountId: "default",
+      direction: "inbound",
+      conversation: {
+        kind: "direct",
+        id: "alice",
+      },
+      senderId: "alice",
+      senderName: "Alice",
+      text: "ping",
+      timestamp: 1_777_000_000_000,
+      reactions: [],
+      ...overrides.message,
+    },
+  };
+}
+
 describe("isHttpMediaUrl", () => {
   it("accepts only http and https urls", () => {
     expect(isHttpMediaUrl("https://example.com/image.png")).toBe(true);
@@ -33,40 +76,109 @@ describe("handleQaInbound", () => {
     vi.mocked(runtime.channel.mentions.buildMentionRegexes).mockReturnValue([/\b@?openclaw\b/i]);
     setQaChannelRuntime(runtime);
 
-    await handleQaInbound({
-      channelId: "qa-channel",
-      channelLabel: "QA Channel",
-      account: {
-        accountId: "default",
-        enabled: true,
-        configured: true,
-        baseUrl: "http://127.0.0.1:43123",
-        botUserId: "openclaw",
-        botDisplayName: "OpenClaw QA",
-        pollTimeoutMs: 250,
-        config: {},
-      },
-      config: {},
-      message: {
-        id: "msg-1",
-        accountId: "default",
-        direction: "inbound",
-        conversation: {
-          kind: "channel",
-          id: "qa-room",
-          title: "QA Room",
+    await handleQaInbound(
+      createQaInboundParams({
+        message: {
+          conversation: {
+            kind: "channel",
+            id: "qa-room",
+            title: "QA Room",
+          },
+          senderId: "alice",
+          senderName: "Alice",
+          text: "@openclaw ping",
         },
-        senderId: "alice",
-        senderName: "Alice",
-        text: "@openclaw ping",
-        timestamp: 1_777_000_000_000,
-        reactions: [],
-      },
-    });
+      }),
+    );
 
     expect(dispatchChannelMessageReplyWithBaseMock).toHaveBeenCalledTimes(1);
     expect(dispatchChannelMessageReplyWithBaseMock.mock.calls[0]?.[0].ctxPayload.WasMentioned).toBe(
       true,
     );
+  });
+
+  it("drops direct messages outside the configured sender allowlist", async () => {
+    const runtime = createPluginRuntimeMock();
+    setQaChannelRuntime(runtime);
+
+    await handleQaInbound(
+      createQaInboundParams({
+        accountConfig: {
+          allowFrom: ["bob"],
+        },
+      }),
+    );
+
+    expect(dispatchChannelMessageReplyWithBaseMock).not.toHaveBeenCalled();
+  });
+
+  it("allows direct messages from configured senders", async () => {
+    const runtime = createPluginRuntimeMock();
+    setQaChannelRuntime(runtime);
+
+    await handleQaInbound(
+      createQaInboundParams({
+        accountConfig: {
+          allowFrom: ["alice"],
+        },
+      }),
+    );
+
+    expect(dispatchChannelMessageReplyWithBaseMock).toHaveBeenCalledTimes(1);
+    expect(dispatchChannelMessageReplyWithBaseMock.mock.calls[0]?.[0].ctxPayload).toMatchObject({
+      CommandAuthorized: true,
+      SenderId: "alice",
+    });
+  });
+
+  it("uses allowFrom as the group sender fallback for allowlist policy", async () => {
+    const runtime = createPluginRuntimeMock();
+    setQaChannelRuntime(runtime);
+
+    await handleQaInbound(
+      createQaInboundParams({
+        accountConfig: {
+          allowFrom: ["alice"],
+          groupPolicy: "allowlist",
+        },
+        message: {
+          conversation: {
+            kind: "group",
+            id: "qa-room",
+            title: "QA Room",
+          },
+        },
+      }),
+    );
+
+    expect(dispatchChannelMessageReplyWithBaseMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips configured group messages that miss mention activation", async () => {
+    const runtime = createPluginRuntimeMock();
+    vi.mocked(runtime.channel.mentions.buildMentionRegexes).mockReturnValue([/\b@?openclaw\b/i]);
+    setQaChannelRuntime(runtime);
+
+    await handleQaInbound(
+      createQaInboundParams({
+        accountConfig: {
+          groups: {
+            "qa-room": {
+              requireMention: true,
+            },
+          },
+        },
+        message: {
+          conversation: {
+            kind: "group",
+            id: "qa-room",
+            title: "QA Room",
+          },
+          text: "plain group message",
+        },
+      }),
+    );
+
+    expect(dispatchChannelMessageReplyWithBaseMock).not.toHaveBeenCalled();
   });
 });

@@ -1,16 +1,12 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-const evaluateSenderGroupAccessForPolicy = vi.hoisted(() => vi.fn());
 const isDangerousNameMatchingEnabled = vi.hoisted(() => vi.fn());
 const resolveAllowlistMatchSimple = vi.hoisted(() => vi.fn());
-const resolveControlCommandGate = vi.hoisted(() => vi.fn());
 const resolveEffectiveAllowFromLists = vi.hoisted(() => vi.fn());
 
 vi.mock("./runtime-api.js", () => ({
-  evaluateSenderGroupAccessForPolicy,
   isDangerousNameMatchingEnabled,
   resolveAllowlistMatchSimple,
-  resolveControlCommandGate,
   resolveEffectiveAllowFromLists,
 }));
 
@@ -32,10 +28,8 @@ describe("mattermost monitor auth", () => {
   });
 
   beforeEach(() => {
-    evaluateSenderGroupAccessForPolicy.mockReset();
     isDangerousNameMatchingEnabled.mockReset();
     resolveAllowlistMatchSimple.mockReset();
-    resolveControlCommandGate.mockReset();
     resolveEffectiveAllowFromLists.mockReset();
   });
 
@@ -47,6 +41,7 @@ describe("mattermost monitor auth", () => {
 
     expect(normalizeMattermostAllowEntry(" @Alice ")).toBe("alice");
     expect(normalizeMattermostAllowEntry("mattermost:Bob")).toBe("bob");
+    expect(normalizeMattermostAllowEntry("accessGroup:Ops")).toBe("accessGroup:Ops");
     expect(normalizeMattermostAllowEntry("*")).toBe("*");
     expect(normalizeMattermostAllowList([" Alice ", "user:alice", "ALICE", "*"])).toEqual([
       "alice",
@@ -95,18 +90,10 @@ describe("mattermost monitor auth", () => {
       effectiveAllowFrom: [],
       effectiveGroupAllowFrom: [],
     });
-    resolveControlCommandGate.mockReturnValue({
-      commandAuthorized: false,
-      shouldBlock: false,
-    });
-    evaluateSenderGroupAccessForPolicy.mockReturnValue({
-      allowed: false,
-      reason: "empty_allowlist",
-    });
     resolveAllowlistMatchSimple.mockReturnValue({ allowed: false });
 
     expect(
-      authorizeMattermostCommandInvocation({
+      await authorizeMattermostCommandInvocation({
         account: {
           config: { dmPolicy: "open" },
         } as never,
@@ -131,7 +118,7 @@ describe("mattermost monitor auth", () => {
     resolveAllowlistMatchSimple.mockReturnValue({ allowed: true });
 
     expect(
-      authorizeMattermostCommandInvocation({
+      await authorizeMattermostCommandInvocation({
         account: {
           config: { dmPolicy: "open", allowFrom: ["*"] },
         } as never,
@@ -150,7 +137,7 @@ describe("mattermost monitor auth", () => {
     });
 
     expect(
-      authorizeMattermostCommandInvocation({
+      await authorizeMattermostCommandInvocation({
         account: {
           config: { dmPolicy: "disabled" },
         } as never,
@@ -168,7 +155,7 @@ describe("mattermost monitor auth", () => {
     });
 
     expect(
-      authorizeMattermostCommandInvocation({
+      await authorizeMattermostCommandInvocation({
         account: {
           config: { groupPolicy: "allowlist" },
         } as never,

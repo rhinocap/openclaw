@@ -1,10 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { logTypingFailure } from "openclaw/plugin-sdk/channel-feedback";
 import { createChannelPairingController } from "openclaw/plugin-sdk/channel-pairing";
-import {
-  resolveDirectDmAuthorizationOutcome,
-  resolveSenderCommandAuthorizationWithRuntime,
-} from "openclaw/plugin-sdk/command-auth";
 import type { MarkdownTableMode, OpenClawConfig } from "openclaw/plugin-sdk/config-types";
 import { resolveInboundRouteEnvelopeBuilderWithRuntime } from "openclaw/plugin-sdk/inbound-envelope";
 import { resolveSendableOutboundReplyParts } from "openclaw/plugin-sdk/reply-payload";
@@ -18,6 +14,7 @@ import {
   warnMissingProviderGroupPolicyFallbackOnce,
 } from "openclaw/plugin-sdk/runtime-group-policy";
 import { registerPluginHttpRoute, resolveWebhookPath } from "openclaw/plugin-sdk/webhook-ingress";
+import { resolveZaloMessageIngressAccess } from "./access-policy.js";
 import type { ResolvedZaloAccount } from "./accounts.js";
 import {
   ZaloApiError,
@@ -32,11 +29,7 @@ import {
   type ZaloMessage,
   type ZaloUpdate,
 } from "./api.js";
-import {
-  evaluateZaloGroupAccess,
-  isZaloSenderAllowed,
-  resolveZaloRuntimeGroupPolicy,
-} from "./group-access.js";
+import { resolveZaloRuntimeGroupPolicy } from "./group-access.js";
 import { resolveZaloProxyFetch } from "./proxy.js";
 import { getZaloRuntime } from "./runtime.js";
 export type { ZaloRuntimeEnv } from "./monitor.types.js";
@@ -424,20 +417,22 @@ async function authorizeZaloMessage(
   const senderName = from.display_name ?? from.name;
 
   const dmPolicy = account.config.dmPolicy ?? "pairing";
-  const configAllowFrom = (account.config.allowFrom ?? []).map((v) => String(v));
-  const configuredGroupAllowFrom = (account.config.groupAllowFrom ?? []).map((v) => String(v));
-  const groupAllowFrom =
-    configuredGroupAllowFrom.length > 0 ? configuredGroupAllowFrom : configAllowFrom;
   const defaultGroupPolicy = resolveDefaultGroupPolicy(config);
-  const groupAccess = isGroup
-    ? evaluateZaloGroupAccess({
-        providerConfigPresent: config.channels?.zalo !== undefined,
-        configuredGroupPolicy: account.config.groupPolicy,
-        defaultGroupPolicy,
-        groupAllowFrom,
-        senderId,
-      })
-    : undefined;
+  const rawBody = text?.trim() || (mediaPath ? "<media:image>" : "");
+  const access = await resolveZaloMessageIngressAccess({
+    accountId: account.accountId,
+    cfg: config,
+    accountConfig: account.config,
+    providerConfigPresent: config.channels?.zalo !== undefined,
+    defaultGroupPolicy,
+    isGroup,
+    chatId,
+    senderId,
+    rawBody,
+    readAllowFromStore: pairing.readAllowFromStore,
+    commandRuntime: core.channel.commands,
+  });
+  const groupAccess = access.groupAccess;
   if (groupAccess) {
     warnMissingProviderGroupPolicyFallbackOnce({
       providerMissingFallbackApplied: groupAccess.providerMissingFallbackApplied,
@@ -461,33 +456,15 @@ async function authorizeZaloMessage(
     }
   }
 
-  const rawBody = text?.trim() || (mediaPath ? "<media:image>" : "");
-  const { senderAllowedForCommands, commandAuthorized } =
-    await resolveSenderCommandAuthorizationWithRuntime({
-      cfg: config,
-      rawBody,
-      isGroup,
-      dmPolicy,
-      configuredAllowFrom: configAllowFrom,
-      configuredGroupAllowFrom: groupAllowFrom,
-      senderId,
-      isSenderAllowed: isZaloSenderAllowed,
-      channel: "zalo",
-      accountId: account.accountId,
-      readAllowFromStore: pairing.readAllowFromStore,
-      runtime: core.channel.commands,
-    });
-
-  const directDmOutcome = resolveDirectDmAuthorizationOutcome({
-    isGroup,
-    dmPolicy,
-    senderAllowedForCommands,
-  });
-  if (directDmOutcome === "disabled") {
+  if (
+    !isGroup &&
+    access.access.decision === "block" &&
+    access.access.reasonCode === "dm_policy_disabled"
+  ) {
     logVerbose(core, runtime, `Blocked zalo DM from ${senderId} (dmPolicy=disabled)`);
     return undefined;
   }
-  if (directDmOutcome === "unauthorized") {
+  if (!isGroup && access.access.decision !== "allow") {
     if (dmPolicy === "pairing") {
       await pairing.issueChallenge({
         senderId,
@@ -523,7 +500,7 @@ async function authorizeZaloMessage(
 
   return {
     chatId,
-    commandAuthorized,
+    commandAuthorized: access.commandAuthorized,
     isGroup,
     rawBody,
     senderId,
@@ -1033,7 +1010,6 @@ export async function monitorZaloProvider(options: ZaloMonitorOptions): Promise<
 }
 
 export const __testing = {
-  evaluateZaloGroupAccess,
   resolveZaloRuntimeGroupPolicy,
   clearHostedMediaRouteRefsForTest: () => hostedMediaRouteRefs.clear(),
 };

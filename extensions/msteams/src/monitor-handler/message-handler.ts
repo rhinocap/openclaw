@@ -4,13 +4,11 @@ import {
   logInboundDrop,
   resolveInboundSessionEnvelopeContext,
 } from "openclaw/plugin-sdk/channel-inbound";
-import { resolveDualTextControlCommandGate } from "openclaw/plugin-sdk/command-gating";
 import {
   filterSupplementalContextItems,
   resolveChannelContextVisibilityMode,
   shouldIncludeSupplementalContext,
 } from "openclaw/plugin-sdk/context-visibility-runtime";
-import { evaluateSenderGroupAccessForPolicy } from "openclaw/plugin-sdk/group-access";
 import {
   dispatchReplyFromConfigWithSettledDispatcher,
   hasFinalInboundReplyDispatch,
@@ -89,11 +87,7 @@ function extractTextFromHtmlAttachments(attachments: MSTeamsAttachmentLike[]): s
   return "";
 }
 import type { MSTeamsMessageHandlerDeps } from "../monitor-handler.types.js";
-import {
-  isMSTeamsGroupAllowed,
-  resolveMSTeamsAllowlistMatch,
-  resolveMSTeamsReplyPolicy,
-} from "../policy.js";
+import { resolveMSTeamsAllowlistMatch, resolveMSTeamsReplyPolicy } from "../policy.js";
 import { extractMSTeamsPollVote } from "../polls.js";
 import { createMSTeamsReplyDispatcher } from "../reply-dispatcher.js";
 import { getMSTeamsRuntime } from "../runtime.js";
@@ -263,16 +257,18 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
       isDirectMessage,
       channelGate,
       access,
-      configuredDmAllowFrom,
       effectiveDmAllowFrom,
       effectiveGroupAllowFrom,
       allowNameMatching,
       groupPolicy,
+      senderGroupAccess,
+      commandAuthorized,
+      shouldBlockControlCommand,
     } = await resolveMSTeamsSenderAccess({
       cfg,
       activity,
+      hasControlCommand: core.channel.text.hasControlCommand(text, cfg),
     });
-    const useAccessGroups = cfg.commands?.useAccessGroups !== false;
     const isChannel = conversationType === "channel";
 
     if (isDirectMessage && msteamsCfg && access.decision !== "allow") {
@@ -340,18 +336,6 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
         });
         return;
       }
-      const senderGroupAccess = evaluateSenderGroupAccessForPolicy({
-        groupPolicy,
-        groupAllowFrom: effectiveGroupAllowFrom,
-        senderId,
-        isSenderAllowed: (_senderId, allowFrom) =>
-          resolveMSTeamsAllowlistMatch({
-            allowFrom,
-            senderId,
-            senderName,
-            allowNameMatching,
-          }).allowed,
-      });
 
       if (!senderGroupAccess.allowed && senderGroupAccess.reason === "disabled") {
         log.info("dropping group message (groupPolicy: disabled)", {
@@ -392,30 +376,7 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
       }
     }
 
-    const commandDmAllowFrom = isDirectMessage ? effectiveDmAllowFrom : configuredDmAllowFrom;
-    const ownerAllowedForCommands = isMSTeamsGroupAllowed({
-      groupPolicy: "allowlist",
-      allowFrom: commandDmAllowFrom,
-      senderId,
-      senderName,
-      allowNameMatching,
-    });
-    const groupAllowedForCommands = isMSTeamsGroupAllowed({
-      groupPolicy: "allowlist",
-      allowFrom: effectiveGroupAllowFrom,
-      senderId,
-      senderName,
-      allowNameMatching,
-    });
-    const { commandAuthorized, shouldBlock } = resolveDualTextControlCommandGate({
-      useAccessGroups,
-      primaryConfigured: commandDmAllowFrom.length > 0,
-      primaryAllowed: ownerAllowedForCommands,
-      secondaryConfigured: effectiveGroupAllowFrom.length > 0,
-      secondaryAllowed: groupAllowedForCommands,
-      hasControlCommand: core.channel.text.hasControlCommand(text, cfg),
-    });
-    if (shouldBlock) {
+    if (shouldBlockControlCommand) {
       logInboundDrop({
         log: logVerboseMessage,
         channel: "msteams",

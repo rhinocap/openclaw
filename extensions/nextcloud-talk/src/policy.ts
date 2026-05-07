@@ -13,7 +13,7 @@ import type {
 } from "../runtime-api.js";
 import type { NextcloudTalkRoomConfig } from "./types.js";
 
-function normalizeAllowEntry(raw: string): string {
+export function normalizeNextcloudTalkAllowEntry(raw: string): string {
   return raw
     .trim()
     .replace(/^(nextcloud-talk|nc-talk|nc):/i, "")
@@ -23,7 +23,9 @@ function normalizeAllowEntry(raw: string): string {
 export function normalizeNextcloudTalkAllowlist(
   values: Array<string | number> | undefined,
 ): string[] {
-  return (values ?? []).map((value) => normalizeAllowEntry(String(value))).filter(Boolean);
+  return (values ?? [])
+    .map((value) => normalizeNextcloudTalkAllowEntry(String(value)))
+    .filter(Boolean);
 }
 
 export function resolveNextcloudTalkAllowlistMatch(params: {
@@ -37,7 +39,7 @@ export function resolveNextcloudTalkAllowlistMatch(params: {
   if (allowFrom.includes("*")) {
     return { allowed: true, matchKey: "*", matchSource: "wildcard" };
   }
-  const senderId = normalizeAllowEntry(params.senderId);
+  const senderId = normalizeNextcloudTalkAllowEntry(params.senderId);
   if (allowFrom.includes(senderId)) {
     return { allowed: true, matchKey: senderId, matchSource: "id" };
   }

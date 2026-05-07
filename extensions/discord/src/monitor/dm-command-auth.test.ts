@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { resolveDiscordDmCommandAccess } from "./dm-command-auth.js";
+import {
+  resolveDiscordDmCommandAccess,
+  resolveDiscordTextCommandAccess,
+} from "./dm-command-auth.js";
 
 const canViewDiscordGuildChannelMock = vi.hoisted(() => vi.fn());
 
@@ -9,6 +12,90 @@ vi.mock("../send.permissions.js", async (importOriginal) => {
     ...actual,
     canViewDiscordGuildChannel: canViewDiscordGuildChannelMock,
   };
+});
+
+describe("resolveDiscordTextCommandAccess", () => {
+  const sender = {
+    id: "123",
+    name: "alice",
+    tag: "alice#0001",
+  };
+
+  it("authorizes guild text commands from owner allowlists", async () => {
+    await expect(
+      resolveDiscordTextCommandAccess({
+        accountId: "default",
+        sender,
+        ownerAllowFrom: ["discord:123"],
+        memberAccessConfigured: false,
+        memberAllowed: false,
+        allowNameMatching: false,
+        useAccessGroups: true,
+        allowTextCommands: true,
+        hasControlCommand: true,
+      }),
+    ).resolves.toEqual({
+      commandAuthorized: true,
+      shouldBlockControlCommand: false,
+    });
+  });
+
+  it("authorizes guild text commands from member access facts", async () => {
+    await expect(
+      resolveDiscordTextCommandAccess({
+        accountId: "default",
+        sender,
+        ownerAllowFrom: [],
+        memberAccessConfigured: true,
+        memberAllowed: true,
+        allowNameMatching: false,
+        useAccessGroups: true,
+        allowTextCommands: true,
+        hasControlCommand: true,
+      }),
+    ).resolves.toEqual({
+      commandAuthorized: true,
+      shouldBlockControlCommand: false,
+    });
+  });
+
+  it("blocks unauthorized guild text control commands", async () => {
+    await expect(
+      resolveDiscordTextCommandAccess({
+        accountId: "default",
+        sender,
+        ownerAllowFrom: ["discord:999"],
+        memberAccessConfigured: true,
+        memberAllowed: false,
+        allowNameMatching: false,
+        useAccessGroups: true,
+        allowTextCommands: true,
+        hasControlCommand: true,
+      }),
+    ).resolves.toEqual({
+      commandAuthorized: false,
+      shouldBlockControlCommand: true,
+    });
+  });
+
+  it("preserves configured mode when access groups are disabled", async () => {
+    await expect(
+      resolveDiscordTextCommandAccess({
+        accountId: "default",
+        sender,
+        ownerAllowFrom: [],
+        memberAccessConfigured: false,
+        memberAllowed: false,
+        allowNameMatching: false,
+        useAccessGroups: false,
+        allowTextCommands: true,
+        hasControlCommand: true,
+      }),
+    ).resolves.toEqual({
+      commandAuthorized: true,
+      shouldBlockControlCommand: false,
+    });
+  });
 });
 
 describe("resolveDiscordDmCommandAccess", () => {

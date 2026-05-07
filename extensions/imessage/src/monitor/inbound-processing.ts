@@ -13,7 +13,6 @@ import {
   resolveChannelGroupRequireMention,
 } from "openclaw/plugin-sdk/channel-policy";
 import { hasControlCommand } from "openclaw/plugin-sdk/command-auth";
-import { resolveDualTextControlCommandGate } from "openclaw/plugin-sdk/command-auth";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-types";
 import { resolveChannelContextVisibilityMode } from "openclaw/plugin-sdk/context-visibility-runtime";
 import {
@@ -23,11 +22,7 @@ import {
 } from "openclaw/plugin-sdk/reply-history";
 import { finalizeInboundContext } from "openclaw/plugin-sdk/reply-runtime";
 import { resolveAgentRoute } from "openclaw/plugin-sdk/routing";
-import {
-  DM_GROUP_ACCESS_REASON,
-  resolveDmGroupAccessWithLists,
-  evaluateSupplementalContextVisibility,
-} from "openclaw/plugin-sdk/security-runtime";
+import { evaluateSupplementalContextVisibility } from "openclaw/plugin-sdk/security-runtime";
 import { sanitizeTerminalText } from "openclaw/plugin-sdk/text-runtime";
 import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-runtime";
 import { resolveIMessageConversationRoute } from "../conversation-route.js";
@@ -36,6 +31,7 @@ import {
   isAllowedIMessageSender,
   normalizeIMessageHandle,
 } from "../targets.js";
+import { resolveIMessageIngressAccess } from "./access-policy.js";
 import { detectReflectedContent } from "./reflection-guard.js";
 import type { SelfChatCache } from "./self-chat-cache.js";
 import type { MonitorIMessageOpts, IMessagePayload } from "./types.js";
@@ -137,7 +133,7 @@ type IMessageInboundDecision =
   | { kind: "pairing"; senderId: string }
   | IMessageInboundDispatchDecision;
 
-export function resolveIMessageInboundDecision(params: {
+export async function resolveIMessageInboundDecision(params: {
   cfg: OpenClawConfig;
   accountId: string;
   message: IMessagePayload;
@@ -160,7 +156,7 @@ export function resolveIMessageInboundDecision(params: {
   };
   selfChatCache?: SelfChatCache;
   logVerbose?: (msg: string) => void;
-}): IMessageInboundDecision {
+}): Promise<IMessageInboundDecision> {
   const senderRaw = params.message.sender ?? "";
   const sender = senderRaw.trim();
   if (!sender) {
@@ -262,46 +258,45 @@ export function resolveIMessageInboundDecision(params: {
   }
 
   const groupId = isGroup ? groupIdCandidate : undefined;
-  const accessDecision = resolveDmGroupAccessWithLists({
+  const hasControlCommandInMessage = hasControlCommand(messageText, params.cfg);
+  const accessDecision = await resolveIMessageIngressAccess({
+    cfg: params.cfg,
+    accountId: params.accountId,
     isGroup,
-    dmPolicy: params.dmPolicy,
-    groupPolicy: params.groupPolicy,
+    sender,
+    chatId,
+    chatGuid,
+    chatIdentifier,
     allowFrom: params.allowFrom,
     groupAllowFrom: params.groupAllowFrom,
     storeAllowFrom: params.storeAllowFrom,
-    groupAllowFromFallbackToAllowFrom: false,
-    isSenderAllowed: (allowFrom) =>
-      isAllowedIMessageSender({
-        allowFrom,
-        sender,
-        chatId,
-        chatGuid,
-        chatIdentifier,
-      }),
+    dmPolicy: params.dmPolicy,
+    groupPolicy: params.groupPolicy,
+    hasControlCommand: hasControlCommandInMessage,
   });
-  const effectiveDmAllowFrom = accessDecision.effectiveAllowFrom;
+  const effectiveDmAllowFrom = accessDecision.effectiveDmAllowFrom;
   const effectiveGroupAllowFrom = accessDecision.effectiveGroupAllowFrom;
 
   if (accessDecision.decision !== "allow") {
     if (isGroup) {
-      if (accessDecision.reasonCode === DM_GROUP_ACCESS_REASON.GROUP_POLICY_DISABLED) {
+      if (accessDecision.reasonCode === "group_policy_disabled") {
         params.logVerbose?.("Blocked iMessage group message (groupPolicy: disabled)");
         return { kind: "drop", reason: "groupPolicy disabled" };
       }
-      if (accessDecision.reasonCode === DM_GROUP_ACCESS_REASON.GROUP_POLICY_EMPTY_ALLOWLIST) {
+      if (accessDecision.reasonCode === "group_policy_empty_allowlist") {
         params.logVerbose?.(
           "Blocked iMessage group message (groupPolicy: allowlist, no groupAllowFrom)",
         );
         return { kind: "drop", reason: "groupPolicy allowlist (empty groupAllowFrom)" };
       }
-      if (accessDecision.reasonCode === DM_GROUP_ACCESS_REASON.GROUP_POLICY_NOT_ALLOWLISTED) {
+      if (accessDecision.reasonCode === "group_policy_not_allowlisted") {
         params.logVerbose?.(`Blocked iMessage sender ${sender} (not in groupAllowFrom)`);
         return { kind: "drop", reason: "not in groupAllowFrom" };
       }
       params.logVerbose?.(`Blocked iMessage group message (${accessDecision.reason})`);
       return { kind: "drop", reason: accessDecision.reason };
     }
-    if (accessDecision.reasonCode === DM_GROUP_ACCESS_REASON.DM_POLICY_DISABLED) {
+    if (accessDecision.reasonCode === "dm_policy_disabled") {
       return { kind: "drop", reason: "dmPolicy disabled" };
     }
     if (accessDecision.decision === "pairing") {
@@ -425,38 +420,8 @@ export function resolveIMessageInboundDecision(params: {
   });
   const canDetectMention = mentionRegexes.length > 0;
 
-  const useAccessGroups = params.cfg.commands?.useAccessGroups !== false;
-  const commandDmAllowFrom = isGroup ? params.allowFrom : effectiveDmAllowFrom;
-  const ownerAllowedForCommands =
-    commandDmAllowFrom.length > 0
-      ? isAllowedIMessageSender({
-          allowFrom: commandDmAllowFrom,
-          sender,
-          chatId,
-          chatGuid,
-          chatIdentifier,
-        })
-      : false;
-  const groupAllowedForCommands =
-    effectiveGroupAllowFrom.length > 0
-      ? isAllowedIMessageSender({
-          allowFrom: effectiveGroupAllowFrom,
-          sender,
-          chatId,
-          chatGuid,
-          chatIdentifier,
-        })
-      : false;
-  const hasControlCommandInMessage = hasControlCommand(messageText, params.cfg);
-  const { commandAuthorized, shouldBlock } = resolveDualTextControlCommandGate({
-    useAccessGroups,
-    primaryConfigured: commandDmAllowFrom.length > 0,
-    primaryAllowed: ownerAllowedForCommands,
-    secondaryConfigured: effectiveGroupAllowFrom.length > 0,
-    secondaryAllowed: groupAllowedForCommands,
-    hasControlCommand: hasControlCommandInMessage,
-  });
-  if (isGroup && shouldBlock) {
+  const commandAuthorized = accessDecision.commandAuthorized;
+  if (accessDecision.shouldBlockControlCommand) {
     if (params.logVerbose) {
       logInboundDrop({
         log: params.logVerbose,

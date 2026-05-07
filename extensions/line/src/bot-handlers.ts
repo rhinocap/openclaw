@@ -5,14 +5,13 @@ import {
   resolveInboundMentionDecision,
 } from "openclaw/plugin-sdk/channel-inbound";
 import { createChannelPairingChallengeIssuer } from "openclaw/plugin-sdk/channel-pairing";
-import { hasControlCommand, resolveControlCommandGate } from "openclaw/plugin-sdk/command-auth";
+import { hasControlCommand } from "openclaw/plugin-sdk/command-auth";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-types";
 import {
   readChannelAllowFromStore,
   resolvePairingIdLabel,
   upsertChannelPairingRequest,
 } from "openclaw/plugin-sdk/conversation-runtime";
-import { evaluateMatchedGroupAccessForPolicy } from "openclaw/plugin-sdk/group-access";
 import { createClaimableDedupe, type ClaimableDedupe } from "openclaw/plugin-sdk/persistent-dedupe";
 import {
   DEFAULT_GROUP_HISTORY_LIMIT,
@@ -23,18 +22,8 @@ import {
 import { resolveAgentRoute } from "openclaw/plugin-sdk/routing";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime";
 import { danger, logVerbose } from "openclaw/plugin-sdk/runtime-env";
-import {
-  resolveAllowlistProviderRuntimeGroupPolicy,
-  resolveDefaultGroupPolicy,
-  warnMissingProviderGroupPolicyFallbackOnce,
-} from "openclaw/plugin-sdk/runtime-group-policy";
-import {
-  firstDefined,
-  isSenderAllowed,
-  normalizeAllowFrom,
-  normalizeDmAllowFromWithStore,
-  type NormalizedAllowFrom,
-} from "./bot-access.js";
+import { warnMissingProviderGroupPolicyFallbackOnce } from "openclaw/plugin-sdk/runtime-group-policy";
+import { resolveLineIngressAccess } from "./access-policy.js";
 import {
   buildLineMessageContext,
   buildLinePostbackContext,
@@ -239,129 +228,87 @@ async function shouldProcessLineEvent(
   const { cfg, account } = context;
   const { userId, groupId, roomId, isGroup } = getLineSourceInfo(event.source);
   const senderId = userId ?? "";
-  const dmPolicy = account.config.dmPolicy ?? "pairing";
-
-  const storeAllowFrom = await readChannelAllowFromStore(
-    "line",
-    undefined,
-    account.accountId,
-  ).catch(() => []);
-  const effectiveDmAllow = normalizeDmAllowFromWithStore({
-    allowFrom: account.config.allowFrom,
-    storeAllowFrom,
-    dmPolicy,
-  });
   const groupConfig = resolveLineGroupConfig({ config: account.config, groupId, roomId });
-  const groupAllowOverride = groupConfig?.allowFrom;
-  const fallbackGroupAllowFrom = account.config.allowFrom?.length
-    ? account.config.allowFrom
-    : undefined;
-  const groupAllowFrom = firstDefined(
-    groupAllowOverride,
-    account.config.groupAllowFrom,
-    fallbackGroupAllowFrom,
-  );
-  const effectiveGroupAllow = normalizeAllowFrom(groupAllowFrom);
-  const defaultGroupPolicy = resolveDefaultGroupPolicy(cfg);
-  const { groupPolicy, providerMissingFallbackApplied } =
-    resolveAllowlistProviderRuntimeGroupPolicy({
-      providerConfigPresent: cfg.channels?.line !== undefined,
-      groupPolicy: account.config.groupPolicy,
-      defaultGroupPolicy,
-    });
+  const rawText = resolveEventRawText(event);
+  const access = await resolveLineIngressAccess({
+    cfg,
+    accountId: account.accountId,
+    accountConfig: account.config,
+    providerConfigPresent: cfg.channels?.line !== undefined,
+    isGroup,
+    conversationId: (groupId ?? roomId ?? senderId) || "unknown",
+    senderId,
+    hasControlCommand: hasControlCommand(rawText, cfg),
+    eventKind: event.type === "postback" ? "postback" : "message",
+    groupConfig,
+    readAllowFromStore: async () =>
+      await readChannelAllowFromStore("line", undefined, account.accountId),
+  });
   warnMissingProviderGroupPolicyFallbackOnce({
-    providerMissingFallbackApplied,
+    providerMissingFallbackApplied: access.providerMissingFallbackApplied,
     providerKey: "line",
     accountId: account.accountId,
     log: (message) => logVerbose(message),
   });
+
+  if (access.decision === "allow") {
+    return {
+      allowed: true,
+      commandAuthorized: access.commandAuthorized,
+    };
+  }
 
   if (isGroup) {
     if (groupConfig?.enabled === false) {
       logVerbose(`Blocked line group ${groupId ?? roomId ?? "unknown"} (group disabled)`);
       return denied;
     }
-    if (groupAllowOverride !== undefined) {
+    if (groupConfig?.allowFrom !== undefined) {
       if (!senderId) {
         logVerbose("Blocked line group message (group allowFrom override, no sender ID)");
         return denied;
       }
-      if (!isSenderAllowed({ allow: effectiveGroupAllow, senderId })) {
+      if (access.reasonCode !== "group_policy_allowed") {
         logVerbose(`Blocked line group sender ${senderId} (group allowFrom override)`);
         return denied;
       }
     }
-    const senderGroupAccess = evaluateMatchedGroupAccessForPolicy({
-      groupPolicy,
-      requireMatchInput: true,
-      hasMatchInput: Boolean(senderId),
-      allowlistConfigured: effectiveGroupAllow.entries.length > 0,
-      allowlistMatched:
-        Boolean(senderId) &&
-        isSenderAllowed({
-          allow: effectiveGroupAllow,
-          senderId,
-        }),
-    });
-    if (!senderGroupAccess.allowed && senderGroupAccess.reason === "disabled") {
+    if (access.reasonCode === "group_policy_disabled") {
       logVerbose("Blocked line group message (groupPolicy: disabled)");
-      return denied;
-    }
-    if (!senderGroupAccess.allowed && senderGroupAccess.reason === "missing_match_input") {
+    } else if (!senderId && access.groupPolicy === "allowlist") {
       logVerbose("Blocked line group message (no sender ID, groupPolicy: allowlist)");
-      return denied;
-    }
-    if (!senderGroupAccess.allowed && senderGroupAccess.reason === "empty_allowlist") {
+    } else if (access.reasonCode === "group_policy_empty_allowlist") {
       logVerbose("Blocked line group message (groupPolicy: allowlist, no groupAllowFrom)");
-      return denied;
-    }
-    if (!senderGroupAccess.allowed && senderGroupAccess.reason === "not_allowlisted") {
+    } else {
       logVerbose(`Blocked line group message from ${senderId} (groupPolicy: allowlist)`);
-      return denied;
     }
-    return {
-      allowed: true,
-      commandAuthorized: resolveLineCommandAuthorized({
-        cfg,
-        event,
-        senderId,
-        allow: effectiveGroupAllow,
-      }),
-    };
+    return denied;
   }
 
-  if (dmPolicy === "disabled") {
+  if (access.reasonCode === "dm_policy_disabled") {
     logVerbose("Blocked line sender (dmPolicy: disabled)");
     return denied;
   }
 
-  const dmAllowed = isSenderAllowed({ allow: effectiveDmAllow, senderId });
-  if (!dmAllowed) {
-    if (dmPolicy === "pairing") {
-      if (!senderId) {
-        logVerbose("Blocked line sender (dmPolicy: pairing, no sender ID)");
-        return denied;
-      }
-      await sendLinePairingReply({
-        senderId,
-        replyToken: "replyToken" in event ? event.replyToken : undefined,
-        context,
-      });
-    } else {
-      logVerbose(`Blocked line sender ${senderId || "unknown"} (dmPolicy: ${dmPolicy})`);
+  if (access.decision === "pairing") {
+    if (!senderId) {
+      logVerbose("Blocked line sender (dmPolicy: pairing, no sender ID)");
+      return denied;
     }
+    await sendLinePairingReply({
+      senderId,
+      replyToken: "replyToken" in event ? event.replyToken : undefined,
+      context,
+    });
     return denied;
   }
 
-  return {
-    allowed: true,
-    commandAuthorized: resolveLineCommandAuthorized({
-      cfg,
-      event,
-      senderId,
-      allow: effectiveDmAllow,
-    }),
-  };
+  logVerbose(
+    `Blocked line sender ${senderId || "unknown"} (dmPolicy: ${
+      account.config.dmPolicy ?? "pairing"
+    })`,
+  );
+  return denied;
 }
 
 function getLineMentionees(
@@ -398,27 +345,6 @@ function resolveEventRawText(event: MessageEvent | PostbackEvent): string {
     return event.postback?.data?.trim() ?? "";
   }
   return "";
-}
-
-function resolveLineCommandAuthorized(params: {
-  cfg: OpenClawConfig;
-  event: MessageEvent | PostbackEvent;
-  senderId?: string;
-  allow: NormalizedAllowFrom;
-}): boolean {
-  const senderAllowedForCommands = isSenderAllowed({
-    allow: params.allow,
-    senderId: params.senderId,
-  });
-  const useAccessGroups = params.cfg.commands?.useAccessGroups !== false;
-  const rawText = resolveEventRawText(params.event);
-  const commandGate = resolveControlCommandGate({
-    useAccessGroups,
-    authorizers: [{ configured: params.allow.hasEntries, allowed: senderAllowedForCommands }],
-    allowTextCommands: true,
-    hasControlCommand: hasControlCommand(rawText, params.cfg),
-  });
-  return commandGate.commandAuthorized;
 }
 
 async function handleMessageEvent(event: MessageEvent, context: LineHandlerContext): Promise<void> {

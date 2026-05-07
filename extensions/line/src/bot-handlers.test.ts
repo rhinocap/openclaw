@@ -285,17 +285,25 @@ function createLineWebhookTestContext(params: {
   processMessage: LineWebhookContext["processMessage"];
   groupPolicy?: LineAccountConfig["groupPolicy"];
   dmPolicy?: LineAccountConfig["dmPolicy"];
+  allowFrom?: LineAccountConfig["allowFrom"];
+  groupAllowFrom?: LineAccountConfig["groupAllowFrom"];
   requireMention?: boolean;
   groupHistories?: Map<string, HistoryEntry[]>;
   replayCache?: ReturnType<typeof createLineWebhookReplayCache>;
+  accessGroups?: Record<string, { type: "message.senders"; members: Record<string, string[]> }>;
 }): Parameters<typeof handleLineWebhookEvents>[1] {
+  const allowFrom = params.allowFrom ?? (params.dmPolicy === "open" ? ["*"] : undefined);
   const lineConfig = {
     ...(params.groupPolicy ? { groupPolicy: params.groupPolicy } : {}),
     ...(params.dmPolicy ? { dmPolicy: params.dmPolicy } : {}),
-    ...(params.dmPolicy === "open" ? { allowFrom: ["*"] } : {}),
+    ...(allowFrom ? { allowFrom } : {}),
+    ...(params.groupAllowFrom ? { groupAllowFrom: params.groupAllowFrom } : {}),
   };
   return {
-    cfg: { channels: { line: lineConfig } },
+    cfg: {
+      ...(params.accessGroups ? { accessGroups: params.accessGroups } : {}),
+      channels: { line: lineConfig },
+    },
     account: {
       accountId: "default",
       enabled: true,
@@ -491,8 +499,35 @@ describe("handleLineWebhookEvents", () => {
     expect(processMessage).toHaveBeenCalledTimes(1);
   });
 
-  it("blocks group sender not in groupAllowFrom even when sender is paired in DM store", async () => {
-    readAllowFromStoreMock.mockResolvedValueOnce(["user-store"]);
+  it("authorizes group control commands through shared access groups", async () => {
+    const processMessage = vi.fn();
+    await handleLineWebhookEvents(
+      [
+        createTestMessageEvent({
+          message: { id: "m3a", type: "text", text: "!status", quoteToken: "quote-token" },
+          source: { type: "group", groupId: "group-1", userId: "user-ag" },
+          webhookEventId: "evt-3a",
+        }),
+      ],
+      createLineWebhookTestContext({
+        processMessage,
+        groupPolicy: "allowlist",
+        groupAllowFrom: ["accessGroup:line-operators"],
+        requireMention: true,
+        accessGroups: {
+          "line-operators": {
+            type: "message.senders",
+            members: { line: ["user-ag"] },
+          },
+        },
+      }),
+    );
+
+    expect(buildLineMessageContextMock).toHaveBeenCalledTimes(1);
+    expect(processMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks group sender not in groupAllowFrom without consulting the DM pairing store", async () => {
     const processMessage = vi.fn();
     const event = {
       type: "message",
@@ -524,7 +559,7 @@ describe("handleLineWebhookEvents", () => {
 
     expect(processMessage).not.toHaveBeenCalled();
     expect(buildLineMessageContextMock).not.toHaveBeenCalled();
-    expect(readAllowFromStoreMock).toHaveBeenCalledWith("line", undefined, "default");
+    expect(readAllowFromStoreMock).not.toHaveBeenCalled();
   });
 
   it("blocks group messages without sender id when groupPolicy is allowlist", async () => {
@@ -562,7 +597,6 @@ describe("handleLineWebhookEvents", () => {
   });
 
   it("does not authorize group messages from DM pairing-store entries when group allowlist is empty", async () => {
-    readAllowFromStoreMock.mockResolvedValueOnce(["user-5"]);
     const processMessage = vi.fn();
     await expectGroupMessageBlocked({
       processMessage,
@@ -591,6 +625,7 @@ describe("handleLineWebhookEvents", () => {
         processMessage,
       },
     });
+    expect(readAllowFromStoreMock).not.toHaveBeenCalled();
   });
 
   it("blocks group messages when wildcard group config disables groups", async () => {
